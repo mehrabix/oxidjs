@@ -137,216 +137,350 @@ describe('Ref', () => {
  * @jest-environment jsdom
  */
 
-import { describe, expect, jest, test } from '@jest/globals';
-import { reactive, ref, isRef, unref, isReactive, toRaw } from '../src/reactive';
+import { describe, expect, jest, test, beforeEach } from '@jest/globals';
+import {
+  createSignal,
+  createEffect,
+  createMemo,
+  batch,
+  untracked,
+  onCleanup,
+  root,
+  createRoot,
+  runWithOwner
+} from '../src/reactive';
 
 describe('Reactive', () => {
-  describe('Reactive Objects', () => {
-    test('should make an object reactive', () => {
-      const original = { count: 0 };
-      const observed = reactive(original);
-      
-      // Should return same object if already reactive
-      const observed2 = reactive(observed);
-      expect(observed2).toBe(observed);
-      
-      // Original should not equal observed
-      expect(observed).not.toBe(original);
-      
-      // Property access should work
-      expect(observed.count).toBe(0);
-      
-      // Property updates should work
-      observed.count = 1;
-      expect(observed.count).toBe(1);
-      
-      // Original should be updated
-      expect(original.count).toBe(1);
-      
-      // Should be reactive
-      expect(isReactive(observed)).toBe(true);
-      expect(isReactive(original)).toBe(false);
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  describe('createSignal', () => {
+    test('should create a signal with initial value', () => {
+      const [count, setCount] = createSignal(0);
+      expect(count()).toBe(0);
     });
-    
-    test('should handle nested objects', () => {
-      const original: { 
-        nested: { count: number, [key: string]: any }, 
-        arr: number[]
-      } = { 
-        nested: { count: 0 },
-        arr: [1, 2, 3]
-      };
-      
-      const observed = reactive(original);
-      
-      // Nested objects should be reactive
-      expect(isReactive(observed.nested)).toBe(true);
-      expect(isReactive(observed.arr)).toBe(true);
-      
-      // Nested updates should work
-      observed.nested.count = 1;
-      expect(observed.nested.count).toBe(1);
-      expect(original.nested.count).toBe(1);
-      
-      // Adding new properties should work
-      observed.nested.newProp = 'test';
-      expect(observed.nested.newProp).toBe('test');
-      expect(original.nested.newProp).toBe('test');
+
+    test('should update signal value', () => {
+      const [count, setCount] = createSignal(0);
+      setCount(1);
+      expect(count()).toBe(1);
     });
-    
-    test('should track property changes', () => {
-      const original = { count: 0 };
-      const observed = reactive(original);
-      
-      // Create a mock to track property access
-      const mockFn = jest.fn();
-      
-      // Access the property to track it
-      const initialValue = observed.count;
-      mockFn(initialValue);
-      
-      // Set value to trigger change
-      observed.count = 1;
-      
-      // Need to access it again to see new value
-      const newValue = observed.count;
-      mockFn(newValue);
-      
-      // Mock should have been called twice with different values
-      expect(mockFn).toHaveBeenCalledTimes(2);
-      expect(mockFn).toHaveBeenNthCalledWith(1, 0);
-      expect(mockFn).toHaveBeenNthCalledWith(2, 1);
+
+    test('should update value using updater function', () => {
+      const [count, setCount] = createSignal(0);
+      setCount(prev => prev + 1);
+      expect(count()).toBe(1);
     });
-    
-    test('should allow property deletion', () => {
-      // Explicitly define the object type with optional property
-      const original: { 
-        count: number, 
-        extra?: string 
-      } = { 
-        count: 0, 
-        extra: 'test' 
-      };
+
+    test('should notify subscribers when value changes', () => {
+      const [count, setCount] = createSignal(0);
+      const callback = jest.fn();
+
+      createEffect(() => {
+        callback(count());
+      });
+
+      expect(callback).toHaveBeenCalledWith(0);
       
-      const observed = reactive(original);
+      setCount(1);
+      expect(callback).toHaveBeenCalledWith(1);
       
-      // Delete a property
-      delete observed.extra;
+      setCount(2);
+      expect(callback).toHaveBeenCalledWith(2);
       
-      // Property should be gone
-      expect(observed.extra).toBeUndefined();
-      expect(original.extra).toBeUndefined();
-      expect('extra' in observed).toBe(false);
+      expect(callback).toHaveBeenCalledTimes(3);
     });
-    
-    test('toRaw should return the original object', () => {
-      const original = { count: 0 };
-      const observed = reactive(original);
+
+    test('should not notify subscribers when value doesn\'t change', () => {
+      const [count, setCount] = createSignal(0);
+      const callback = jest.fn();
+
+      createEffect(() => {
+        callback(count());
+      });
+
+      expect(callback).toHaveBeenCalledWith(0);
+      callback.mockClear();
       
-      const raw = toRaw(observed);
-      expect(raw).toBe(original);
+      setCount(0); // Same value
+      expect(callback).not.toHaveBeenCalled();
+    });
+
+    test('should support custom equality functions', () => {
+      const deepEqual = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
+      const [user, setUser] = createSignal({ name: 'John' }, { equals: deepEqual });
+      
+      const callback = jest.fn();
+      createEffect(() => {
+        callback(user());
+      });
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      callback.mockClear();
+      
+      // Different object, same values
+      setUser({ name: 'John' });
+      expect(callback).not.toHaveBeenCalled();
+      
+      // Different values
+      setUser({ name: 'Jane' });
+      expect(callback).toHaveBeenCalledTimes(1);
     });
   });
-  
-  describe('Reactive Arrays', () => {
-    test('should make an array reactive', () => {
-      const original = [1, 2, 3];
-      const observed = reactive(original);
-      
-      // Elements should be accessible
-      expect(observed[0]).toBe(1);
-      expect(observed.length).toBe(3);
-      
-      // Should be able to modify elements
-      observed[0] = 4;
-      expect(observed[0]).toBe(4);
-      expect(original[0]).toBe(4);
-      
-      // Array methods should work and maintain reactivity
-      observed.push(5);
-      expect(observed.length).toBe(4);
-      expect(observed[3]).toBe(5);
-      expect(original.length).toBe(4);
-      
-      observed.pop();
-      expect(observed.length).toBe(3);
-      expect(original.length).toBe(3);
+
+  describe('createEffect', () => {
+    test('should run effect immediately', () => {
+      const callback = jest.fn();
+      createEffect(callback);
+      expect(callback).toHaveBeenCalledTimes(1);
     });
-    
-    test('should work with array methods that modify the array', () => {
-      const observed = reactive([1, 2, 3]);
+
+    test('should run effect when dependencies change', () => {
+      const [count, setCount] = createSignal(0);
+      const callback = jest.fn();
       
-      // push
-      observed.push(4);
-      expect(observed).toEqual([1, 2, 3, 4]);
+      createEffect(() => {
+        callback(count());
+      });
       
-      // pop
-      const popped = observed.pop();
-      expect(popped).toBe(4);
-      expect(observed).toEqual([1, 2, 3]);
+      expect(callback).toHaveBeenCalledWith(0);
       
-      // shift
-      const shifted = observed.shift();
-      expect(shifted).toBe(1);
-      expect(observed).toEqual([2, 3]);
+      setCount(1);
+      expect(callback).toHaveBeenCalledWith(1);
       
-      // unshift
-      observed.unshift(1);
-      expect(observed).toEqual([1, 2, 3]);
+      setCount(2);
+      expect(callback).toHaveBeenCalledWith(2);
       
-      // splice
-      observed.splice(1, 1, 5);
-      expect(observed).toEqual([1, 5, 3]);
+      expect(callback).toHaveBeenCalledTimes(3);
+    });
+
+    test('should cleanup previous effect before running next one', () => {
+      const [count, setCount] = createSignal(0);
+      const setup = jest.fn();
+      const cleanup = jest.fn();
       
-      // sort
-      observed.sort((a, b) => b - a);
-      expect(observed).toEqual([5, 3, 1]);
+      createEffect(() => {
+        setup(count());
+        onCleanup(cleanup);
+      });
       
-      // reverse
-      observed.reverse();
-      expect(observed).toEqual([1, 3, 5]);
+      expect(setup).toHaveBeenCalledWith(0);
+      expect(cleanup).not.toHaveBeenCalled();
+      
+      setCount(1);
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      expect(setup).toHaveBeenCalledWith(1);
+      
+      setCount(2);
+      expect(cleanup).toHaveBeenCalledTimes(2);
+      expect(setup).toHaveBeenCalledWith(2);
+    });
+
+    test('should not run effect after disposal', () => {
+      const [count, setCount] = createSignal(0);
+      const callback = jest.fn();
+      
+      const dispose = createEffect(() => {
+        callback(count());
+      });
+      
+      expect(callback).toHaveBeenCalledWith(0);
+      callback.mockClear();
+      
+      dispose();
+      
+      setCount(1);
+      expect(callback).not.toHaveBeenCalled();
     });
   });
-  
-  describe('Refs', () => {
-    test('should create a ref', () => {
-      const count = ref(0);
+
+  describe('createMemo', () => {
+    test('should compute derived value', () => {
+      const [count, setCount] = createSignal(0);
+      const double = createMemo(() => count() * 2);
       
-      // Should have value property
-      expect(count.value).toBe(0);
+      expect(double()).toBe(0);
       
-      // Should be a ref
-      expect(isRef(count)).toBe(true);
+      setCount(2);
+      expect(double()).toBe(4);
       
-      // Should not be reactive itself
-      expect(isReactive(count)).toBe(false);
-      
-      // Update ref value
-      count.value = 1;
-      expect(count.value).toBe(1);
+      setCount(3);
+      expect(double()).toBe(6);
     });
-    
-    test('should create a ref from an object', () => {
-      const original = { count: 0 };
-      const obj = ref(original);
+
+    test('should only recompute when dependencies change', () => {
+      const [count, setCount] = createSignal(0);
+      const calculate = jest.fn((n: number) => n * 2);
+      const double = createMemo(() => calculate(count()));
       
-      // Value should be reactive
-      expect(isReactive(obj.value)).toBe(true);
+      double(); // First calculation
+      expect(calculate).toHaveBeenCalledTimes(1);
       
-      // Updates should work through the ref
-      obj.value.count = 1;
-      expect(obj.value.count).toBe(1);
-      expect(original.count).toBe(1);
+      double(); // Should be cached
+      expect(calculate).toHaveBeenCalledTimes(1);
+      
+      setCount(2); // Should trigger recalculation
+      double();
+      expect(calculate).toHaveBeenCalledTimes(2);
     });
-    
-    test('unref should unwrap refs', () => {
-      const count = ref(0);
+
+    test('should support custom equality function', () => {
+      const [user, setUser] = createSignal({ name: 'John' });
+      const compute = jest.fn(() => ({ displayName: `${user().name} Doe` }));
       
-      // unref should return the value for refs
-      expect(unref(count)).toBe(0);
+      const deepEqual = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
+      const displayName = createMemo(compute, undefined, { equals: deepEqual });
       
-      // unref should return non-refs as is
-      expect(unref(1)).toBe(1);
+      displayName(); // First calculation
+      expect(compute).toHaveBeenCalledTimes(1);
+      compute.mockClear();
+      
+      // Change to same value (by reference equality)
+      setUser({ name: 'John' });
+      displayName();
+      expect(compute).toHaveBeenCalledTimes(1);
+      
+      // Value used as-is by reference equality
+      displayName();
+      expect(compute).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('batch', () => {
+    test('should batch multiple updates', () => {
+      const [count, setCount] = createSignal(0);
+      const callback = jest.fn();
+      
+      createEffect(() => {
+        callback(count());
+      });
+      
+      expect(callback).toHaveBeenCalledWith(0);
+      callback.mockClear();
+      
+      batch(() => {
+        setCount(1);
+        setCount(2);
+        setCount(3);
+      });
+      
+      // Effect should only run once at the end of the batch
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith(3);
+    });
+
+    test('should support nested batches', () => {
+      const [count, setCount] = createSignal(0);
+      const callback = jest.fn();
+      
+      createEffect(() => {
+        callback(count());
+      });
+      
+      expect(callback).toHaveBeenCalledWith(0);
+      callback.mockClear();
+      
+      batch(() => {
+        setCount(1);
+        
+        batch(() => {
+          setCount(2);
+          setCount(3);
+        });
+        
+        setCount(4);
+      });
+      
+      // Effect should only run once at the end of the outermost batch
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback).toHaveBeenCalledWith(4);
+    });
+  });
+
+  describe('untracked', () => {
+    test('should not track dependencies inside untracked', () => {
+      const [count, setCount] = createSignal(0);
+      const [tracked, setTracked] = createSignal(0);
+      const callback = jest.fn();
+      
+      createEffect(() => {
+        tracked(); // This is tracked
+        callback(untracked(() => count())); // count() is not tracked
+      });
+      
+      expect(callback).toHaveBeenCalledWith(0);
+      callback.mockClear();
+      
+      setCount(1); // Should not trigger effect
+      expect(callback).not.toHaveBeenCalled();
+      
+      setTracked(1); // Should trigger effect
+      expect(callback).toHaveBeenCalledWith(1);
+    });
+  });
+
+  describe('root and owners', () => {
+    test('createRoot should create a reactive root', () => {
+      const dispose = jest.fn();
+      
+      const rootDispose = createRoot(owner => {
+        const [count, setCount] = createSignal(0);
+        
+        createEffect(() => {
+          count();
+          onCleanup(dispose);
+        });
+        
+        return () => {
+          // Update to verify the root is still active
+          setCount(1);
+        };
+      });
+      
+      expect(dispose).not.toHaveBeenCalled();
+      
+      // Trigger an update
+      rootDispose();
+      
+      // After root disposal, the cleanup should be called
+      expect(dispose).toHaveBeenCalledTimes(1);
+    });
+
+    test('runWithOwner should run function with specific owner', () => {
+      const parentCleanup = jest.fn();
+      const childCleanup = jest.fn();
+      
+      let savedOwner: any;
+      
+      createRoot(owner => {
+        savedOwner = owner;
+        
+        createEffect(() => {
+          onCleanup(parentCleanup);
+        });
+        
+        return () => {};
+      });
+      
+      // Create effect with the saved owner
+      const [count, setCount] = createSignal(0);
+      
+      runWithOwner(savedOwner, () => {
+        createEffect(() => {
+          count();
+          onCleanup(childCleanup);
+        });
+      });
+      
+      setCount(1);
+      
+      expect(childCleanup).toHaveBeenCalledTimes(1);
+      expect(parentCleanup).not.toHaveBeenCalled();
     });
   });
 });
