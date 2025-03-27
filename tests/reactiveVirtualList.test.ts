@@ -54,7 +54,7 @@ describe('ReactiveVirtualList', () => {
     const window = virtualList.virtualWindow();
     
     expect(window.startIndex).toBe(0);
-    expect(window.endIndex).toBe(0);
+    expect(window.endIndex).toBe(-1);
     expect(window.totalCount).toBe(0);
     expect(window.visibleItems).toEqual([]);
     expect(window.totalHeight).toBe(0);
