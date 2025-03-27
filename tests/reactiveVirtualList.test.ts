@@ -23,7 +23,7 @@ jest.mock('../src/signal', () => {
 
 jest.mock('../src/effect', () => {
   return {
-    createEffect: jest.fn().mockImplementation((fn: () => void) => {
+    createEffect: jest.fn().mockImplementation((fn: any) => {
       // Call the function once and return a cleanup function
       fn();
       return () => {}; // Cleanup function
@@ -33,7 +33,7 @@ jest.mock('../src/effect', () => {
 
 jest.mock('../src/utils', () => {
   return {
-    batch: jest.fn().mockImplementation((fn: () => void) => fn()),
+    batch: jest.fn().mockImplementation((fn: any) => fn()),
   };
 });
 
