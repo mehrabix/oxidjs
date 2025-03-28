@@ -1,6 +1,6 @@
 import { Subscriber, batch } from './utils';
-import { createEffect } from './effect';
-import { ReadonlySignal } from './signal';
+import { createEffect, trackEffect } from './effect';
+import { ReadonlySignal, Signal } from './signal';
 
 /**
  * Options for creating a computed value
@@ -16,126 +16,98 @@ const isTestEnv = typeof process !== 'undefined' && process.env &&
   (process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined);
 
 /**
- * Create a computed signal that derives its value from other reactive dependencies
- * @param getter The function that computes the value
- * @param options Options for the computed value
- * @returns A readonly signal representing the computed value
+ * Creates a computed signal that automatically updates when dependencies change
  */
-export function createComputed<T>(
-  getter: () => T,
-  options: ComputedOptions<T> = {}
-): ReadonlySignal<T> {
-  const { equals = Object.is } = options;
-  
-  // Track if the computed needs to be recalculated
-  let dirty = true;
+export function createComputed<T>(compute: () => T, options: ComputedOptions<T> = {}): ReadonlySignal<T> {
   let value: T;
-  let initialized = false;
-  let computeCount = 0;  // Track compute count for tests
-  
-  // Set of subscribers that depend on this computed
+  let prevValue: T | undefined;
+  let isComputing = false;
+  let isDirty = true;
   const subscribers = new Set<Subscriber<T>>();
-  
-  // Create an effect that recalculates the value when dependencies change
+  const equals = options.equals || Object.is;
+
+  const notify = (newValue: T, oldValue: T | undefined) => {
+    if (isComputing) return;
+    batch(() => {
+      subscribers.forEach(fn => fn(newValue, oldValue));
+    });
+  };
+
   const calculate = () => {
-    if (!dirty && initialized) return;
+    if (!isDirty && !isComputing) return value;
     
-    computeCount++;  // Increment compute count
-    
-    const newValue = getter();
-    
-    if (!initialized || !equals(value, newValue)) {
-      const oldValue = value;
+    if (isComputing) {
+      throw new Error('Circular dependency detected in computed signal');
+    }
+
+    isComputing = true;
+    try {
+      const newValue = compute();
+      if (prevValue === undefined || !equals(newValue, prevValue)) {
+        prevValue = value;
+        value = newValue;
+        isDirty = false;
+        notify(value, prevValue);
+      }
+      return value;
+    } finally {
+      isComputing = false;
+    }
+  };
+
+  // Initial computation
+  value = compute();
+  isDirty = false;
+
+  // Track dependencies and recompute when they change
+  createEffect(() => {
+    isDirty = true;
+    const newValue = compute();
+    if (!equals(newValue, value)) {
+      prevValue = value;
       value = newValue;
-      initialized = true;
-      
-      if (subscribers.size > 0) {
-        // In test environments, notify subscribers synchronously
-        if (isTestEnv) {
-          subscribers.forEach(subscriber => subscriber(value, oldValue));
-        } else {
-          batch(() => {
-            subscribers.forEach(subscriber => subscriber(value, oldValue));
-          });
+      notify(value, prevValue);
+    }
+  });
+
+  // Create read-only signal
+  return Object.assign(
+    () => {
+      if (trackEffect) {
+        trackEffect(subscribers);
+      }
+      return calculate();
+    },
+    {
+      get value() {
+        if (trackEffect) {
+          trackEffect(subscribers);
         }
+        return calculate();
+      },
+      set value(_: T) {
+        throw new Error('Cannot set value of computed signal');
+      },
+      peek: () => {
+        if (isDirty) {
+          calculate();
+        }
+        return value;
+      },
+      subscribe: (fn: Subscriber<T>) => {
+        subscribers.add(fn);
+        fn(value, undefined);
+        return () => {
+          subscribers.delete(fn);
+        };
       }
     }
-    
-    dirty = false;
-  };
-  
-  // For test compatibility, attach computeCount to the getter
-  if (isTestEnv) {
-    Object.defineProperty(getter, 'computeCount', {
-      get: () => computeCount
-    });
-  }
-  
-  // Initial calculation
-  calculate();
-  
-  // Set up effect to track dependencies
-  if (isTestEnv) {
-    // For tests, we need special handling to avoid incrementing computeCount
-    // whenever dependencies change
-    createEffect(() => {
-      // Force dirty flag when dependencies change, but don't recompute immediately
-      getter();
-      dirty = true;
-    });
-  } else {
-    // Normal environment behavior
-    createEffect(() => {
-      dirty = true;
-      calculate();
-    });
-  }
-  
-  // Return a readonly signal
-  const signal = (() => {
-    if (dirty) {
-      calculate();
-    }
-    return value;
-  }) as ReadonlySignal<T>;
-  
-  // Add peek method to read value without triggering dependency tracking
-  signal.peek = () => {
-    if (dirty) {
-      calculate();
-    }
-    return value;
-  };
-  
-  // Add subscribe method for manual subscription
-  signal.subscribe = (fn: Subscriber<T>) => {
-    subscribers.add(fn);
-    
-    // In test environment, immediately call the subscriber with current value
-    if (isTestEnv) {
-      fn(value, undefined);
-    }
-    
-    return () => subscribers.delete(fn);
-  };
-  
-  // Add value property accessor
-  Object.defineProperty(signal, 'value', {
-    get() { return signal(); }
-  });
-  
-  return signal;
+  ) as ReadonlySignal<T>;
 }
 
 /**
- * Create a memo, which is a cached computed value that only recalculates when its dependencies change
- * @param fn The function to memoize
- * @param options Options for memoization
- * @returns A readonly signal with the memoized value
+ * Creates a memoized signal that only updates when dependencies change
  */
-export function createMemo<T>(
-  fn: () => T,
-  options: ComputedOptions<T> = {}
-): ReadonlySignal<T> {
-  return createComputed(fn, options);
+export function createMemo<T>(compute: () => T, options: ComputedOptions<T> = {}): ReadonlySignal<T> {
+  return createComputed(compute, options);
 } 

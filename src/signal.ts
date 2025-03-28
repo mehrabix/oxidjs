@@ -1,5 +1,5 @@
-import { Subscriber, isFunction, batch } from './utils';
-import { trackEffect, triggerEffects } from './effect';
+import { batch } from './utils';
+import { createEffect, trackEffect } from './effect';
 
 /**
  * Detect if running in a test environment
@@ -10,139 +10,174 @@ const isTestEnv = typeof process !== 'undefined' && process.env &&
 /**
  * Signal interface with getter and setter functionality
  */
-export interface Signal<T> {
-  (): T;
-  (value: T): T;
+export interface Signal<T> extends ReadonlySignal<T> {
+  /** Set a new value */
+  (value: T | ((prev: T) => T)): T;
+  /** Set a new value */
   value: T;
-  peek(): T;
-  subscribe(fn: Subscriber<T>): () => void;
-}
-
-/**
- * Creates a reactive signal with the provided initial value
- * @param initialValue The initial value of the signal
- * @returns A signal function that can be used to get or set the value
- */
-export function createSignal<T>(initialValue: T): Signal<T> {
-  let value = initialValue;
-  const subscribers = new Set<Subscriber<T>>();
-  
-  // For batch test compatibility
-  const pendingBatches = new Map<Subscriber<T>, { newValue: T, oldValue: T }>();
-  let previousValues = new Map<Subscriber<T>, T>();
-  
-  // Create the signal function
-  const signal = function(nextValue?: T): T {
-    // Getter
-    if (arguments.length === 0) {
-      trackEffect(subscribers);
-      return value;
-    }
-    
-    // Setter
-    if (nextValue === value) return value;
-    
-    const prevValue = value;
-    value = isFunction(nextValue) 
-      ? (nextValue as Function)(prevValue) 
-      : nextValue as T;
-    
-    if (value !== prevValue) {
-      if (isTestEnv) {
-        // Special test handling for batching tests
-        // Store subscriber's previous seen value for correct previous value in batch
-        subscribers.forEach(sub => {
-          if (!previousValues.has(sub)) {
-            previousValues.set(sub, prevValue);
-          }
-          pendingBatches.set(sub, { 
-            newValue: value,
-            oldValue: previousValues.get(sub)!
-          });
-        });
-        
-        batch(() => {
-          // In tests, only trigger each subscriber once with its initial and final values
-          const processed = new Set<Subscriber<T>>();
-          pendingBatches.forEach((values, sub) => {
-            if (!processed.has(sub)) {
-              processed.add(sub);
-              sub(values.newValue, values.oldValue);
-              previousValues.set(sub, values.newValue);
-            }
-          });
-          pendingBatches.clear();
-        });
-      } else {
-        // Regular behavior for non-test environments
-        batch(() => triggerEffects(subscribers, value, prevValue));
-      }
-    }
-    
-    return value;
-  } as Signal<T>;
-
-  // Add additional properties and methods
-  Object.defineProperties(signal, {
-    value: {
-      get() { return signal(); },
-      set(v: T) { signal(v); }
-    }
-  });
-  
-  // Add peek method to read value without tracking
-  signal.peek = () => value;
-  
-  // Add subscribe method for manual subscription
-  signal.subscribe = (fn: Subscriber<T>) => {
-    subscribers.add(fn);
-    
-    // For test compatibility, store this subscriber's initial value
-    if (isTestEnv) {
-      previousValues.set(fn, value);
-    }
-    
-    return () => {
-      subscribers.delete(fn);
-      if (isTestEnv) {
-        previousValues.delete(fn);
-        pendingBatches.delete(fn);
-      }
-    };
-  };
-
-  return signal;
+  /** Update value using a function */
+  update: (fn: (prev: T) => T) => void;
 }
 
 /**
  * A read-only version of a signal
  */
-export type ReadonlySignal<T> = Omit<Signal<T>, 'value'> & { readonly value: T } & ((value?: T) => T);
+export interface ReadonlySignal<T> {
+  /** Get the current value */
+  (): T;
+  /** Get the current value */
+  readonly value: T;
+  /** Get the current value without tracking */
+  peek: () => T;
+  /** Subscribe to value changes */
+  subscribe: (fn: (value: T) => void) => () => void;
+}
 
 /**
- * Creates a signal and returns it split into a getter and setter pair
- * @param initialValue The initial value of the signal
- * @returns A tuple with a getter and setter for the signal
+ * Creates a signal with a getter and setter
  */
-export function createSignalPair<T>(
-  initialValue: T
-): [ReadonlySignal<T>, (value: T | ((prev: T) => T)) => T] {
-  const signal = createSignal(initialValue);
-  
-  const getter = (() => signal()) as ReadonlySignal<T>;
-  getter.peek = () => signal.peek();
-  getter.subscribe = (fn) => signal.subscribe(fn);
-  
-  Object.defineProperty(getter, 'value', {
-    get: () => signal()
+export function createSignal<T>(initialValue: T): Signal<T> {
+  let value = initialValue;
+  const subscribers = new Set<(value: T) => void>();
+  let isNotifying = false;
+
+  const notify = (newValue: T) => {
+    if (isNotifying) return;
+    isNotifying = true;
+    batch(() => {
+      subscribers.forEach(fn => fn(newValue));
+    });
+    isNotifying = false;
+  };
+
+  // Create the signal function
+  function signalFn(): T;
+  function signalFn(nextValue: T | ((prev: T) => T)): T;
+  function signalFn(nextValue?: T | ((prev: T) => T)): T {
+    if (arguments.length === 0) {
+      if (trackEffect) {
+        trackEffect(subscribers);
+      }
+      return value;
+    }
+
+    const newValue = typeof nextValue === 'function'
+      ? (nextValue as (prev: T) => T)(value)
+      : nextValue as T;
+
+    if (newValue === value) return value;
+    value = newValue;
+    notify(newValue);
+    return value;
+  }
+
+  // Add signal properties
+  Object.defineProperties(signalFn, {
+    value: {
+      get() {
+        if (trackEffect) {
+          trackEffect(subscribers);
+        }
+        return value;
+      },
+      set(newValue: T) {
+        if (newValue === value) return;
+        value = newValue;
+        notify(newValue);
+      },
+      enumerable: true,
+      configurable: true
+    },
+    peek: {
+      value: () => value,
+      enumerable: true,
+      configurable: true
+    },
+    update: {
+      value: (fn: (prev: T) => T) => {
+        const newValue = fn(value);
+        if (newValue === value) return;
+        value = newValue;
+        notify(newValue);
+      },
+      enumerable: true,
+      configurable: true
+    },
+    subscribe: {
+      value: (fn: (value: T) => void) => {
+        subscribers.add(fn);
+        fn(value); // Call immediately with current value
+        return () => {
+          subscribers.delete(fn);
+        };
+      },
+      enumerable: true,
+      configurable: true
+    }
   });
 
-  const setter = (value: T | ((prev: T) => T)) => signal(value as T);
+  return signalFn as Signal<T>;
+}
+
+/**
+ * Creates a signal pair with a getter and setter
+ */
+export function createSignalPair<T>(initialValue: T): [ReadonlySignal<T>, (value: T | ((prev: T) => T)) => T] {
+  const signal = createSignal(initialValue);
   
-  // For testing purposes, expose the setter to make signal chains work
-  if (isTestEnv) {
-    (getter as any).__setter = setter;
-  }
-  
-  return [getter, setter];
+  // Create read-only version
+  const readonlySignal = Object.assign(
+    () => signal(),
+    {
+      get value() {
+        return signal.value;
+      },
+      set value(newValue: T) {
+        throw new Error('Cannot set value of read-only signal');
+      },
+      peek: signal.peek,
+      subscribe: signal.subscribe
+    }
+  ) as ReadonlySignal<T>;
+
+  return [readonlySignal, signal];
+}
+
+/**
+ * Creates a computed signal that automatically updates when dependencies change
+ */
+export function createComputed<T>(compute: () => T): ReadonlySignal<T> {
+  const signal = createSignal<T>(undefined as T);
+  let isComputing = false;
+
+  createEffect(() => {
+    if (isComputing) return;
+    isComputing = true;
+    signal(compute());
+    isComputing = false;
+  });
+
+  // Create read-only version
+  const readonlySignal = Object.assign(
+    () => signal(),
+    {
+      get value() {
+        return signal.value;
+      },
+      set value(newValue: T) {
+        throw new Error('Cannot set value of computed signal');
+      },
+      peek: signal.peek,
+      subscribe: signal.subscribe
+    }
+  ) as ReadonlySignal<T>;
+
+  return readonlySignal;
+}
+
+/**
+ * Creates a memoized signal that only updates when dependencies change
+ */
+export function createMemo<T>(compute: () => T): ReadonlySignal<T> {
+  return createComputed(compute);
 } 

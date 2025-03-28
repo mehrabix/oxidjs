@@ -963,4 +963,11 @@ export function createInfiniteQuery<T, E = Error>(
   });
   
   return infiniteQuery;
+}
+
+/**
+ * Reset the entire query cache
+ */
+export function resetQueryCache(): void {
+  queryCache.clear();
 } 

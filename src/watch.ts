@@ -62,31 +62,23 @@ function doWatch<T = any>(
 ): () => void {
   const { immediate = false, deep = false, ...effectOptions } = options;
   
-  // Track the previous value
-  let oldValue: any;
-  // For multiple sources
+  let oldValue: any = undefined;
   let oldValues: any[] = [];
+  let isFirstRun = true;
   
   // Getter for the source value
   const getter = () => {
-    // Handle multiple sources
     if (Array.isArray(source) && !isFunction(source)) {
-      return source.map((s, i) => {
-        const value = getWatchValue(s);
-        oldValues[i] = value;
-        return value;
-      });
-    } else {
-      // Handle single source
-      return getWatchValue(source as WatchSource);
+      return source.map((s) => getWatchValue(s));
     }
+    return getWatchValue(source as WatchSource);
   };
   
   // Call the callback with current and previous values
   const callCallback = (newValue: any) => {
     if (Array.isArray(source) && !isFunction(source)) {
-      callback(newValue, oldValues.slice());
-      oldValues = newValue.slice();
+      callback(newValue, oldValues);
+      oldValues = [...newValue];
     } else {
       callback(newValue, oldValue);
       oldValue = newValue;
@@ -97,22 +89,26 @@ function doWatch<T = any>(
   const effect = () => {
     const newValue = getter();
     
-    // Initial run
-    if (immediate || (Array.isArray(source) && !isFunction(source))) {
-      untrack(() => callCallback(newValue));
-    } else if (oldValue !== undefined) {
-      untrack(() => callCallback(newValue));
+    if (isFirstRun) {
+      if (immediate) {
+        untrack(() => callCallback(newValue));
+      } else {
+        if (Array.isArray(source) && !isFunction(source)) {
+          oldValues = [...newValue];
+        } else {
+          oldValue = newValue;
+        }
+      }
+      isFirstRun = false;
     } else {
-      oldValue = newValue;
+      untrack(() => callCallback(newValue));
     }
     
     return newValue;
   };
   
   // Create and run the effect
-  const stop = createEffect(effect, effectOptions);
-  
-  return stop;
+  return createEffect(effect, effectOptions);
 }
 
 /**
@@ -120,11 +116,12 @@ function doWatch<T = any>(
  */
 function getWatchValue<T>(source: WatchSource<T>): T {
   if (isFunction(source)) {
-    return (source as Function)();
-  } else if ('value' in source) {
+    return source();
+  }
+  if ('value' in source) {
     return source.value;
-  } else if (typeof source === 'function') {
-    // Handle signal functions
+  }
+  if (typeof source === 'function') {
     return (source as any)();
   }
   return source as unknown as T;

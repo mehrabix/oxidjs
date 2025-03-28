@@ -5,31 +5,34 @@ import { batch } from './utils';
 /**
  * Action type definition
  */
-export interface Action<T = any> {
+export type Action<T extends string = string> = {
   /** Unique identifier for the action type */
-  type: string;
+  type: T;
   /** Optional payload data associated with the action */
-  payload?: T;
+  payload?: any;
   /** When the action was dispatched */
-  timestamp: number;
+  timestamp?: number;
   /** Optional metadata about the action */
   meta?: Record<string, any>;
-}
+};
 
 /**
  * Action creator function type
  */
-export type ActionCreator<T = any> = (payload: T) => Action<T>;
+export type ActionCreator<T extends string = string> = {
+  type: T;
+  (...args: any[]): Action<T>;
+};
 
 /**
  * Action handler function type
  */
-export type ActionHandler<T = any, R = any> = (state: R, action: Action<T>) => R;
+export type ActionHandler<T extends string = string, S = any> = (state: S, action: Action<T>) => S;
 
 /**
  * Action history state
  */
-export interface ActionHistory<T = any> {
+export interface ActionHistory<T extends string = string> {
   /** All actions in chronological order */
   actions: Action<T>[];
   /** Current position in the action history */
@@ -43,11 +46,13 @@ export interface ActionHistory<T = any> {
 /**
  * Action manager for tracking and time-traveling through actions
  */
-export interface ActionManager<T = any, S = any> {
+export interface ActionManager<T extends string = string, S = any> {
   /** Dispatch a new action */
   dispatch: (action: Action<T>) => void;
   /** Get the current state */
   state: ReadonlySignal<S>;
+  /** Get the current state value */
+  getState: () => S;
   /** Get the action history */
   history: ReadonlySignal<ActionHistory<T>>;
   /** Undo the last action */
@@ -61,14 +66,17 @@ export interface ActionManager<T = any, S = any> {
   /** Subscribe to actions of a specific type */
   on: <P = any>(type: string, callback: (payload: P) => void) => () => void;
   /** Register a middleware to process actions */
-  use: (middleware: ActionMiddleware<T, S>) => () => void;
+  use: (middleware: ActionMiddleware<T>) => () => void;
 }
 
 /**
  * Middleware function for intercepting and transforming actions
  */
-export type ActionMiddleware<T = any, S = any> = 
-  (action: Action<T>, state: S, next: (action: Action<T>) => void) => void;
+export type ActionMiddleware<T extends string = string> = {
+  (action: Action<T>, next: (action: Action<T>) => Action<T>): Action<T>;
+};
+
+export type DispatchFunction<T extends string = string> = (action: Action<T>) => void;
 
 /**
  * Options for creating an action manager
@@ -90,31 +98,50 @@ export interface ActionManagerOptions<S> {
 
 /**
  * Creates a typed action creator
- * 
- * @param type Action type string
- * @returns An action creator function
  */
-export function createAction<T = void>(type: string): ActionCreator<T> {
-  return (payload: T): Action<T> => ({
+export function createAction<T extends string = string>(
+  type: T,
+  payloadCreator: (...args: any[]) => any = (payload) => payload
+): ActionCreator<T> {
+  const actionCreator = (...args: any[]): Action<T> => ({
     type,
-    payload,
-    timestamp: Date.now()
+    payload: payloadCreator(...args)
   });
+
+  actionCreator.type = type;
+  return actionCreator;
+}
+
+/**
+ * Creates a group of related actions
+ */
+export function createActionGroup<P extends string = string>(
+  prefix: P,
+  actions: Record<string, (...args: any[]) => any>
+): Record<string, ActionCreator<`${P}/${string}`>> {
+  return Object.entries(actions).reduce((acc, [key, payloadCreator]) => {
+    acc[key] = createAction(`${prefix}/${key}`, payloadCreator);
+    return acc;
+  }, {} as Record<string, ActionCreator<`${P}/${string}`>>);
+}
+
+/**
+ * Creates a middleware function
+ */
+export function createMiddleware<T extends string = string>(
+  middleware: (action: Action<T>, next: (action: Action<T>) => Action<T>) => Action<T>
+): ActionMiddleware<T> {
+  return middleware;
 }
 
 /**
  * Create an action manager for tracking and time-traveling through actions
- * 
- * @param reducer Main reducer function to handle actions
- * @param options Configuration options
- * @returns An action manager instance
  */
-export function createActionManager<T = any, S = any>(
-  reducer: (state: S, action: Action<T>) => S,
-  options: ActionManagerOptions<S>
+export function createActionManager<T extends string = string, S = any>(
+  initialState: S,
+  options: ActionManagerOptions<S> = { initialState }
 ): ActionManager<T, S> {
   const {
-    initialState,
     historyLimit = 100,
     enableTimeTravel = true,
     persist = false,
@@ -122,29 +149,12 @@ export function createActionManager<T = any, S = any>(
     storage = typeof window !== 'undefined' ? window.localStorage : null
   } = options;
   
-  // Load persisted state if enabled
-  let startingState = initialState;
-  let startingHistory: Action<T>[] = [];
-  
-  if (persist && storage) {
-    try {
-      const savedData = storage.getItem(storageKey);
-      if (savedData) {
-        const parsed = JSON.parse(savedData);
-        if (parsed.state) startingState = parsed.state;
-        if (parsed.actions) startingHistory = parsed.actions;
-      }
-    } catch (e) {
-      console.error('Failed to load persisted actions:', e);
-    }
-  }
-  
   // Create signals for state and history
-  const [getState, setState] = createSignalPair<S>(startingState);
+  const [getState, setState] = createSignalPair<S>(initialState);
   const [getHistory, setHistory] = createSignalPair<ActionHistory<T>>({
-    actions: startingHistory,
-    position: startingHistory.length - 1,
-    canUndo: startingHistory.length > 0,
+    actions: [],
+    position: -1,
+    canUndo: false,
     canRedo: false
   });
   
@@ -152,7 +162,7 @@ export function createActionManager<T = any, S = any>(
   const listeners = new Map<string, Set<(payload: any) => void>>();
   
   // Middleware stack
-  const middlewares: ActionMiddleware<T, S>[] = [];
+  const middlewares: ActionMiddleware<T>[] = [];
   
   // Save to storage if persistence is enabled
   if (persist && storage) {
@@ -171,11 +181,6 @@ export function createActionManager<T = any, S = any>(
     });
   }
   
-  // Apply an action using the reducer
-  const applyAction = (action: Action<T>): S => {
-    return reducer(getState(), action);
-  };
-  
   // Process an action through middleware
   const processAction = (action: Action<T>) => {
     const processedAction = { ...action };
@@ -188,26 +193,22 @@ export function createActionManager<T = any, S = any>(
     
     // Create middleware chain
     let index = 0;
-    const state = getState();
     
-    const next = (nextAction: Action<T>) => {
+    const next = (nextAction: Action<T>): Action<T> => {
       if (index < middlewares.length) {
         const middleware = middlewares[index++];
-        middleware(nextAction, state, next);
-      } else {
-        completeAction(nextAction);
+        return middleware(nextAction, next);
       }
+      return nextAction;
     };
     
     // Start middleware chain
-    next(processedAction);
+    const result = next(processedAction);
+    completeAction(result);
   };
   
   // Complete action processing after middleware
   const completeAction = (action: Action<T>) => {
-    // Apply the action to get new state
-    const newState = applyAction(action);
-    
     // Get current history
     const history = getHistory();
     
@@ -227,7 +228,7 @@ export function createActionManager<T = any, S = any>(
     
     // Update state and history
     batch(() => {
-      setState(newState);
+      setState(initialState);
       
       setHistory({
         actions: newActions,
@@ -248,7 +249,6 @@ export function createActionManager<T = any, S = any>(
   
   // Dispatch a new action
   const dispatch = (action: Action<T>) => {
-    // Process the action through middleware
     processAction(action);
   };
   
@@ -262,15 +262,9 @@ export function createActionManager<T = any, S = any>(
     const newPosition = history.position - 1;
     if (newPosition < 0) return;
     
-    // Recompute state by replaying actions up to the new position
-    let newState = initialState;
-    for (let i = 0; i <= newPosition; i++) {
-      newState = reducer(newState, history.actions[i]);
-    }
-    
     // Update state and history position
     batch(() => {
-      setState(newState);
+      setState(initialState);
       setHistory({
         actions: history.actions,
         position: newPosition,
@@ -292,11 +286,10 @@ export function createActionManager<T = any, S = any>(
     
     // Apply the next action
     const action = history.actions[newPosition];
-    const newState = reducer(getState(), action);
     
     // Update state and history position
     batch(() => {
-      setState(newState);
+      setState(initialState);
       setHistory({
         actions: history.actions,
         position: newPosition,
@@ -321,15 +314,9 @@ export function createActionManager<T = any, S = any>(
     const history = getHistory();
     if (position < 0 || position >= history.actions.length) return;
     
-    // Recompute state by replaying actions up to the target position
-    let newState = initialState;
-    for (let i = 0; i <= position; i++) {
-      newState = reducer(newState, history.actions[i]);
-    }
-    
     // Update state and history position
     batch(() => {
-      setState(newState);
+      setState(initialState);
       setHistory({
         actions: history.actions,
         position,
@@ -376,7 +363,7 @@ export function createActionManager<T = any, S = any>(
   };
   
   // Register middleware
-  const use = (middleware: ActionMiddleware<T, S>): (() => void) => {
+  const use = (middleware: ActionMiddleware<T>): (() => void) => {
     middlewares.push(middleware);
     
     // Return function to remove middleware
@@ -391,6 +378,7 @@ export function createActionManager<T = any, S = any>(
   return {
     dispatch,
     state: getState,
+    getState: () => getState(),
     history: getHistory,
     undo,
     redo,
@@ -404,66 +392,152 @@ export function createActionManager<T = any, S = any>(
 /**
  * Record details about an action for logging or debugging
  */
-export function loggerMiddleware<T, S>(): ActionMiddleware<T, S> {
-  return (action, state, next) => {
+export function loggerMiddleware<T extends string>(): ActionMiddleware<T> {
+  return (action: Action<T>, next: (action: Action<T>) => Action<T>) => {
     console.group(`Action: ${action.type}`);
     console.log('Payload:', action.payload);
-    console.log('Timestamp:', new Date(action.timestamp).toISOString());
-    console.log('Previous State:', state);
+    if (action.timestamp) {
+      console.log('Timestamp:', new Date(action.timestamp).toISOString());
+    }
     
-    // Pass to next middleware
-    next(action);
+    // Pass to next middleware and return result
+    const result = next(action);
     
-    // Log the new state after applying the action
-    console.log('New State:', state);
     console.groupEnd();
+    return result;
   };
 }
 
 /**
  * Filter actions based on a predicate
  */
-export function filterMiddleware<T, S>(
+export function filterMiddleware<T extends string>(
   predicate: (action: Action<T>) => boolean
-): ActionMiddleware<T, S> {
-  return (action, _state, next) => {
+): ActionMiddleware<T> {
+  return (action: Action<T>, next: (action: Action<T>) => Action<T>) => {
     if (predicate(action)) {
-      next(action);
+      return next(action);
     }
-    // Otherwise, the action is ignored
+    return action;
   };
 }
 
 /**
  * Throttle actions of the same type
  */
-export function throttleMiddleware<T, S>(
+export function throttleMiddleware<T extends string>(
   duration: number = 300
-): ActionMiddleware<T, S> {
-  const throttled = new Map<string, number>();
+): ActionMiddleware<T> {
+  const throttled = new Map<T, number>();
   
-  return (action, _state, next) => {
+  return (action: Action<T>, next: (action: Action<T>) => Action<T>) => {
     const now = Date.now();
     const lastTime = throttled.get(action.type) || 0;
     
     if (now - lastTime >= duration) {
       throttled.set(action.type, now);
-      next(action);
+      return next(action);
     }
+    return action;
   };
 }
 
 /**
  * Creates a reducer that handles different action types with different handlers
  */
-export function createReducer<S>(
-  initialState: S, 
-  handlers: Record<string, ActionHandler<any, S>>
-): (state: S, action: Action) => S {
-  return (state = initialState, action) => {
-    if (Object.prototype.hasOwnProperty.call(handlers, action.type)) {
-      return handlers[action.type](state, action);
+export function createReducer<S = any, T extends string = string>(
+  initialState: S,
+  builder: (builder: {
+    addCase: <A extends T>(
+      actionCreator: ActionCreator<A>,
+      reducer: (state: S, action: Action<A>) => S
+    ) => void;
+    addDefaultCase: (reducer: (state: S, action: Action<T>) => S) => void;
+    addMatcher: (
+      matcher: (action: Action<T>) => boolean,
+      reducer: (state: S, action: Action<T>) => S
+    ) => void;
+  }) => void
+): (state: S | undefined, action: Action<T>) => S {
+  const handlers: Record<string, (state: S, action: Action<T>) => S> = {};
+  let defaultHandler: ((state: S, action: Action<T>) => S) | undefined;
+
+  const builderObj = {
+    addCase: <A extends T>(
+      actionCreator: ActionCreator<A>,
+      reducer: (state: S, action: Action<A>) => S
+    ) => {
+      handlers[actionCreator.type] = reducer as (state: S, action: Action<T>) => S;
+    },
+    addDefaultCase: (reducer: (state: S, action: Action<T>) => S) => {
+      defaultHandler = reducer;
+    },
+    addMatcher: (
+      matcher: (action: Action<T>) => boolean,
+      reducer: (state: S, action: Action<T>) => S
+    ) => {
+      handlers[matcher.toString()] = reducer;
+    }
+  };
+
+  builder(builderObj);
+
+  return (state: S | undefined = initialState, action: Action<T>): S => {
+    const handler = handlers[action.type] || defaultHandler;
+    if (handler) {
+      return handler(state, action);
     }
     return state;
+  };
+}
+
+// Default action manager instance
+const defaultActionManager = createActionManager<string, any>(
+  {} as any,
+  { initialState: {} as any }
+);
+
+// Export dispatch function from default manager
+export const dispatch = (action: Action) => {
+  defaultActionManager.dispatch(action);
+};
+
+// Export getActions function
+export const getActions = () => defaultActionManager.state;
+
+// Export subscribe function
+export const subscribe = (callback: (action: Action) => void) => {
+  return defaultActionManager.on('*', callback);
+};
+
+// Export applyMiddleware function
+export function applyMiddleware<T extends string>(
+  ...middlewares: ActionMiddleware<T>[]
+): (dispatch: DispatchFunction<T>) => DispatchFunction<T> {
+  return (dispatch) => {
+    // Create the base dispatch function that returns the action
+    const baseDispatch = (action: Action<T>): Action<T> => {
+      dispatch(action);
+      return action;
+    };
+
+    // Return the new dispatch function
+    return (action: Action<T>): void => {
+      let index = 0;
+      
+      const next = (nextAction: Action<T>): Action<T> => {
+        if (index < middlewares.length) {
+          const middleware = middlewares[index++];
+          return middleware(nextAction, next);
+        }
+        return baseDispatch(nextAction);
+      };
+
+      // Start middleware chain and dispatch result
+      const result = next(action);
+      if (result !== action) {
+        dispatch(result);
+      }
+    };
   };
 } 

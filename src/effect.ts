@@ -43,7 +43,11 @@ export function triggerEffects<T>(
 ): void {
   // Create a new Set to avoid issues if subscribers are modified during iteration
   const effects = new Set(subscribers);
-  effects.forEach(effect => effect(value, prevValue));
+  effects.forEach(effect => {
+    if (effect !== activeEffect) {
+      effect(value, prevValue);
+    }
+  });
 }
 
 /**
@@ -51,6 +55,20 @@ export function triggerEffects<T>(
  */
 const isTestEnv = typeof process !== 'undefined' && process.env && 
   (process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined);
+
+/**
+ * Run an effect synchronously
+ */
+function runSync(fn: EffectFunction): void {
+  fn();
+}
+
+/**
+ * Queue an effect to run in the next microtask
+ */
+function queueEffect(fn: EffectFunction): void {
+  queueMicrotask(fn);
+}
 
 /**
  * Create and run an effect with automatic dependency tracking
@@ -62,88 +80,57 @@ export function createEffect<T = void>(
   fn: EffectFunction<T>,
   options: EffectOptions = {}
 ): () => void {
-  // In test environments, run effects synchronously by default
-  const { scheduler = isTestEnv ? runSync : queueEffect, onCleanup } = options;
+  const { scheduler = queueEffect, onCleanup } = options;
   
   let cleanup: EffectCleanup | undefined;
-  let lastValue: T | undefined;
+  let isDisposed = false;
   
   // The actual effect function that will be executed
   const effect = () => {
+    if (isDisposed) return;
+
     // Run cleanup if it exists before re-running the effect
     if (cleanup) {
       cleanup();
       cleanup = undefined;
     }
     
-    activeEffect = effectRunner;
-    effectStack.push(effectRunner);
+    // Save the current active effect
+    const prevEffect = activeEffect;
+    const prevStack = effectStack;
+    
+    // Set up the effect context
+    activeEffect = effect;
+    effectStack = [...prevStack, effect];
     
     try {
-      lastValue = fn();
-      return lastValue;
+      const result = fn();
+      
+      // Handle cleanup registration
+      if (onCleanup) {
+        onCleanup((cleanupFn: EffectCleanup) => {
+          cleanup = cleanupFn;
+        });
+      }
+      
+      return result;
     } finally {
-      effectStack.pop();
-      activeEffect = effectStack[effectStack.length - 1] || null;
+      // Restore the previous effect context
+      activeEffect = prevEffect;
+      effectStack = prevStack;
     }
   };
   
-  // Create the effect runner with a reference to itself
-  const effectRunner = () => {
-    scheduler(effect);
-    return lastValue;
-  };
-  
-  // For testing, handle cleanup differently
-  if (isTestEnv && onCleanup) {
-    // In test environment, register the cleanup immediately
-    onCleanup((cleanupFn: EffectCleanup) => {
-      cleanup = cleanupFn;
-      
-      // For test compatibility, mock the cleanupMock calls if it exists
-      const globalObj = typeof window !== 'undefined' ? window : typeof global !== 'undefined' ? global : {};
-      if ((globalObj as any).cleanupMock) {
-        (globalObj as any).cleanupMock();
-      }
-    });
-  } else if (onCleanup) {
-    // Set a cleanup handler that will be called when the effect is re-run or disposed
-    onCleanup((cleanupFn: EffectCleanup) => {
-      cleanup = cleanupFn;
-    });
-  }
-  
-  // Initially run the effect
-  effectRunner();
+  // Run the effect immediately
+  effect();
   
   // Return a function to dispose the effect
   return () => {
+    isDisposed = true;
     if (cleanup) {
       cleanup();
-      
-      // For test compatibility, mock the cleanupMock calls if it exists
-      if (isTestEnv) {
-        const globalObj = typeof window !== 'undefined' ? window : typeof global !== 'undefined' ? global : {};
-        if ((globalObj as any).cleanupMock) {
-          (globalObj as any).cleanupMock();
-        }
-      }
     }
   };
-}
-
-/**
- * Run an effect synchronously
- */
-function runSync(effect: EffectFunction): void {
-  effect();
-}
-
-/**
- * Schedule an effect to run asynchronously
- */
-function queueEffect(effect: EffectFunction): void {
-  queueMicrotask(effect);
 }
 
 /**
